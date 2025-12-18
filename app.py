@@ -1,27 +1,26 @@
-# app.py (통파일) - 현재 사용자 코드 기반 + Render Persistent Disk(DB/업로드/백업 유지) + 백업 30개 유지 자동정리
+# app.py (통파일) - SQLite/ Postgres 모두 대응 + Render Persistent Disk(업로드/백업 유지) + 백업 30개 자동정리
 from collections import defaultdict
 from flask import (
     Flask, render_template, request, redirect, url_for,
     session, flash, jsonify, send_from_directory, abort
 )
-import sqlite3
 import os
+import sqlite3
+import zipfile
+from datetime import datetime, date
+
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from datetime import datetime, date
-import zipfile
+
+# Postgres (DATABASE_URL 있을 때만 사용)
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
 
 app = Flask(__name__)
 
 # =========================
 # ✅ Render/장기운영용 설정
-# - SECRET_KEY: Render 환경변수 권장
-# - DATA_DIR: Render Persistent Disk 마운트 경로(예: /var/data)
-# - DB_PATH: DB 파일 위치(기본: DATA_DIR/planner.db)
-# - UPLOAD_DIR: 업로드 파일 위치(기본: DATA_DIR/uploads)
-# - BACKUP_DIR: 백업 zip 위치(기본: DATA_DIR/backups)
 # =========================
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 
@@ -54,10 +53,15 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 
 # =========================
-# DB helpers
+# DB helpers (SQLite/Postgres 공통)
 # =========================
+def using_postgres():
+    return DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://")
+
+
 def db():
-    if DATABASE_URL:
+    """conn 반환 (Postgres면 dict row, SQLite면 sqlite3.Row)"""
+    if using_postgres():
         conn = psycopg2.connect(DATABASE_URL, sslmode="require")
         return conn
     conn = sqlite3.connect(DB)
@@ -65,88 +69,179 @@ def db():
     return conn
 
 
+def cursor(conn):
+    """Postgres: RealDictCursor / SQLite: 기본 cursor"""
+    if using_postgres():
+        return conn.cursor(cursor_factory=RealDictCursor)
+    return conn.cursor()
+
+
+def row_get(row, key, default=None):
+    """row가 dict(=Postgres) 또는 sqlite3.Row(=SQLite) 모두 대응"""
+    try:
+        return row.get(key, default)  # dict
+    except Exception:
+        try:
+            return row[key]  # sqlite3.Row
+        except Exception:
+            return default
+
+
+def fetchone(cur):
+    return cur.fetchone()
+
+
+def fetchall(cur):
+    return cur.fetchall()
+
+
+def ph() -> str:
+    """SQL placeholder: Postgres=%s / SQLite=?"""
+    return "%s" if using_postgres() else "?"
+
+
+def insert_returning_id(cur, conn, sql, params):
+    """
+    SQLite: lastrowid
+    Postgres: RETURNING id 사용
+    """
+    if using_postgres():
+        cur.execute(sql + " RETURNING id", params)
+        rid = cur.fetchone()["id"]
+        conn.commit()
+        return rid
+    cur.execute(sql, params)
+    conn.commit()
+    return cur.lastrowid
+
+
 def init_db():
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    if DATABASE_URL:
+    if using_postgres():
+        # ✅ Postgres 스키마 (AUTOINCREMENT/INTEGER PRIMARY KEY 대신 SERIAL)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        pw_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL
-        )
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        subject TEXT NOT NULL,
-        pages INTEGER NOT NULL,
-        dday TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS daily_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plan_id INTEGER NOT NULL,
-        log_date TEXT NOT NULL,          -- YYYY-MM-DD
-        pages_done INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(plan_id, log_date),
-        FOREIGN KEY(plan_id) REFERENCES plans(id)
-        )
-        """)
-
-        # ✅ 사용자별 이미지 저장(여러 장 누적 저장 가능)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_images (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        image_key TEXT NOT NULL,          -- 예: 'timetable'
-        filename TEXT NOT NULL,           -- 저장된 파일명
-        uploaded_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        """)
-
-        # ✅ 기능4: 학습 회고 노트 (날짜별 1개, 사용자별)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS reflections (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        log_date TEXT NOT NULL,           -- YYYY-MM-DD (회고 날짜)
-        goal_met INTEGER NOT NULL DEFAULT 0,   -- 0/1
-        obstacles TEXT NOT NULL DEFAULT '',    -- 예: "피로,산만함" 또는 자유서술
-        note TEXT NOT NULL DEFAULT '',         -- 한 줄/여러 줄 회고
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(user_id, log_date),
-        FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        """)
-
-    else:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          id SERIAL PRIMARY KEY,
           username TEXT UNIQUE NOT NULL,
           pw_hash TEXT NOT NULL,
           created_at TEXT NOT NULL
         )
         """)
-        # 기존 SQLite CREATE TABLE들 그대로
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          subject TEXT NOT NULL,
+          pages INTEGER NOT NULL,
+          dday TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_logs (
+          id SERIAL PRIMARY KEY,
+          plan_id INTEGER NOT NULL,
+          log_date TEXT NOT NULL,
+          pages_done INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(plan_id, log_date),
+          FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
+        )
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_images (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          image_key TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          uploaded_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS reflections (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          log_date TEXT NOT NULL,
+          goal_met INTEGER NOT NULL DEFAULT 0,
+          obstacles TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(user_id, log_date),
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
+        conn.commit()
+        conn.close()
+        return
 
+    # ✅ SQLite 스키마
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      pw_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      subject TEXT NOT NULL,
+      pages INTEGER NOT NULL,
+      dday TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id INTEGER NOT NULL,
+      log_date TEXT NOT NULL,
+      pages_done INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(plan_id, log_date),
+      FOREIGN KEY(plan_id) REFERENCES plans(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      image_key TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      uploaded_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reflections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      log_date TEXT NOT NULL,
+      goal_met INTEGER NOT NULL DEFAULT 0,
+      obstacles TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, log_date),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 def current_user_id():
     return session.get("user_id")
@@ -248,30 +343,28 @@ def feature1():
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("""
+    cur.execute(f"""
       SELECT id, filename, uploaded_at
       FROM user_images
-      WHERE user_id=? AND image_key='timetable'
+      WHERE user_id={ph()} AND image_key='timetable'
       ORDER BY uploaded_at DESC
     """, (uid,))
-    rows = cur.fetchall()
+    rows = fetchall(cur)
     conn.close()
 
     images = []
     for r in rows:
         images.append({
-            "id": r["id"],
-            # ✅ /static/uploads/... 대신 /uploads/...로 서빙 (디스크에서도 유지)
-            "url": url_for("uploaded_file", user_id=uid, filename=r["filename"]),
-            "uploaded_at": r["uploaded_at"]
+            "id": row_get(r, "id"),
+            "url": url_for("uploaded_file", user_id=uid, filename=row_get(r, "filename")),
+            "uploaded_at": row_get(r, "uploaded_at")
         })
 
     return render_template("feature_timetable.html", images=images)
 
 
-# 기능2: 공부 기록 & 통계
 @app.route("/feature2")
 def feature2():
     gate = login_required_or_redirect()
@@ -280,7 +373,6 @@ def feature2():
     return render_template("feature_stats.html")
 
 
-# 기능3: 공부 패턴 분석
 @app.route("/feature3")
 def feature3():
     gate = login_required_or_redirect()
@@ -289,7 +381,6 @@ def feature3():
     return render_template("feature_pattern.html")
 
 
-# ✅ 기능4: 학습 회고 노트
 @app.route("/feature4")
 def feature4():
     gate = login_required_or_redirect()
@@ -298,7 +389,6 @@ def feature4():
     return render_template("feature_review.html")
 
 
-# ✅ 기능5: 집중 타이머
 @app.route("/feature5")
 def feature5():
     gate = login_required_or_redirect()
@@ -330,18 +420,36 @@ def register():
         return redirect(url_for("register"))
 
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
+
+    now = datetime.now().isoformat(timespec="seconds")
     try:
-        cur.execute(
-            "INSERT INTO users(username, pw_hash, created_at) VALUES (?, ?, ?)",
-            (username, generate_password_hash(password), datetime.now().isoformat(timespec="seconds"))
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
+        if using_postgres():
+            insert_returning_id(
+                cur, conn,
+                f"INSERT INTO users(username, pw_hash, created_at) VALUES ({ph()}, {ph()}, {ph()})",
+                (username, generate_password_hash(password), now)
+            )
+        else:
+            insert_returning_id(
+                cur, conn,
+                f"INSERT INTO users(username, pw_hash, created_at) VALUES ({ph()}, {ph()}, {ph()})",
+                (username, generate_password_hash(password), now)
+            )
+    except Exception:
+        # Postgres/SQLite 모두 UNIQUE 충돌 가능
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         flash("이미 존재하는 아이디입니다.")
+        conn.close()
         return redirect(url_for("register"))
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     flash("회원가입 완료! 로그인해 주세요.")
     return redirect(url_for("login"))
@@ -356,17 +464,17 @@ def login():
     password = request.form.get("password", "")
 
     conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username=?", (username,))
-    user = cur.fetchone()
+    cur = cursor(conn)
+    cur.execute(f"SELECT * FROM users WHERE username={ph()}", (username,))
+    user = fetchone(cur)
     conn.close()
 
-    if not user or not check_password_hash(user["pw_hash"], password):
+    if (not user) or (not check_password_hash(row_get(user, "pw_hash", ""), password)):
         flash("아이디 또는 비밀번호가 올바르지 않습니다.")
         return redirect(url_for("login"))
 
-    session["user_id"] = user["id"]
-    session["username"] = user["username"]
+    session["user_id"] = row_get(user, "id")
+    session["username"] = row_get(user, "username")
 
     return redirect(url_for("dashboard"))
 
@@ -387,11 +495,12 @@ def api_plans_get():
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM plans WHERE user_id=? ORDER BY id DESC", (uid,))
-    plans = [dict(r) for r in cur.fetchall()]
+    cur = cursor(conn)
+    cur.execute(f"SELECT * FROM plans WHERE user_id={ph()} ORDER BY id DESC", (uid,))
+    plans = fetchall(cur)
     conn.close()
-    return jsonify({"ok": True, "plans": plans})
+
+    return jsonify({"ok": True, "plans": [dict(r) if isinstance(r, dict) else dict(r) for r in plans]})
 
 
 @app.route("/api/plans", methods=["POST"])
@@ -421,13 +530,14 @@ def api_plans_add():
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO plans(user_id, subject, pages, dday, created_at) VALUES (?, ?, ?, ?, ?)",
-        (uid, subject, pages, dday, datetime.now().isoformat(timespec="seconds"))
+    cur = cursor(conn)
+
+    now = datetime.now().isoformat(timespec="seconds")
+    new_id = insert_returning_id(
+        cur, conn,
+        f"INSERT INTO plans(user_id, subject, pages, dday, created_at) VALUES ({ph()}, {ph()}, {ph()}, {ph()}, {ph()})",
+        (uid, subject, pages, dday, now)
     )
-    conn.commit()
-    new_id = cur.lastrowid
     conn.close()
 
     return jsonify({"ok": True, "id": new_id})
@@ -440,16 +550,17 @@ def api_plans_delete(plan_id):
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("""
+    # daily_logs 먼저 삭제
+    cur.execute(f"""
       DELETE FROM daily_logs
-      WHERE plan_id IN (SELECT id FROM plans WHERE id=? AND user_id=?)
+      WHERE plan_id IN (SELECT id FROM plans WHERE id={ph()} AND user_id={ph()})
     """, (plan_id, uid))
 
-    cur.execute("DELETE FROM plans WHERE id=? AND user_id=?", (plan_id, uid))
-    conn.commit()
+    cur.execute(f"DELETE FROM plans WHERE id={ph()} AND user_id={ph()}", (plan_id, uid))
     deleted = cur.rowcount
+    conn.commit()
     conn.close()
 
     return jsonify({"ok": True, "deleted": deleted})
@@ -468,26 +579,26 @@ def api_today():
     today_s = today.isoformat()
 
     conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM plans WHERE user_id=? ORDER BY id DESC", (uid,))
-    plans = cur.fetchall()
+    cur = cursor(conn)
+    cur.execute(f"SELECT * FROM plans WHERE user_id={ph()} ORDER BY id DESC", (uid,))
+    plans = fetchall(cur)
 
     result = []
     for p in plans:
-        plan_id = p["id"]
-        total_pages = p["pages"]
-        dday = parse_yyyy_mm_dd(p["dday"])
+        plan_id = row_get(p, "id")
+        total_pages = int(row_get(p, "pages", 0))
+        dday = parse_yyyy_mm_dd(row_get(p, "dday"))
         days_left = diff_days_inclusive(today, dday)
 
-        cur.execute("SELECT COALESCE(SUM(pages_done), 0) AS s FROM daily_logs WHERE plan_id=?", (plan_id,))
-        done_total = cur.fetchone()["s"]
+        cur.execute(f"SELECT COALESCE(SUM(pages_done), 0) AS s FROM daily_logs WHERE plan_id={ph()}", (plan_id,))
+        done_total = int(row_get(fetchone(cur), "s", 0))
 
         remaining = max(0, total_pages - done_total)
         target_range = calc_target_range(remaining, days_left)
 
-        cur.execute("SELECT pages_done FROM daily_logs WHERE plan_id=? AND log_date=?", (plan_id, today_s))
-        row = cur.fetchone()
-        done_today = row["pages_done"] if row else 0
+        cur.execute(f"SELECT pages_done FROM daily_logs WHERE plan_id={ph()} AND log_date={ph()}", (plan_id, today_s))
+        row = fetchone(cur)
+        done_today = int(row_get(row, "pages_done", 0)) if row else 0
 
         met = False
         if target_range is not None:
@@ -496,9 +607,9 @@ def api_today():
 
         result.append({
             "plan_id": plan_id,
-            "subject": p["subject"],
+            "subject": row_get(p, "subject"),
             "total_pages": total_pages,
-            "dday": p["dday"],
+            "dday": row_get(p, "dday"),
             "days_left": days_left,
             "done_total": done_total,
             "remaining": remaining,
@@ -537,20 +648,31 @@ def api_log_upsert():
     today_s = date.today().isoformat()
 
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("SELECT id FROM plans WHERE id=? AND user_id=?", (plan_id, uid))
-    if not cur.fetchone():
+    cur.execute(f"SELECT id FROM plans WHERE id={ph()} AND user_id={ph()}", (plan_id, uid))
+    if not fetchone(cur):
         conn.close()
         return jsonify({"ok": False, "error": "not_found"}), 404
 
     now = datetime.now().isoformat(timespec="seconds")
-    cur.execute("""
-      INSERT INTO daily_logs(plan_id, log_date, pages_done, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(plan_id, log_date)
-      DO UPDATE SET pages_done=excluded.pages_done, updated_at=excluded.updated_at
-    """, (plan_id, today_s, pages_done, now, now))
+
+    if using_postgres():
+        # ✅ Postgres: %s placeholder + ON CONFLICT
+        cur.execute(f"""
+          INSERT INTO daily_logs(plan_id, log_date, pages_done, created_at, updated_at)
+          VALUES ({ph()}, {ph()}, {ph()}, {ph()}, {ph()})
+          ON CONFLICT(plan_id, log_date)
+          DO UPDATE SET pages_done=EXCLUDED.pages_done, updated_at=EXCLUDED.updated_at
+        """, (plan_id, today_s, pages_done, now, now))
+    else:
+        # ✅ SQLite
+        cur.execute(f"""
+          INSERT INTO daily_logs(plan_id, log_date, pages_done, created_at, updated_at)
+          VALUES ({ph()}, {ph()}, {ph()}, {ph()}, {ph()})
+          ON CONFLICT(plan_id, log_date)
+          DO UPDATE SET pages_done=excluded.pages_done, updated_at=excluded.updated_at
+        """, (plan_id, today_s, pages_done, now, now))
 
     conn.commit()
     conn.close()
@@ -585,16 +707,17 @@ def upload_timetable():
     base = secure_filename(f.filename)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filename = f"{ts}_{base}"
-
     save_path = os.path.join(user_dir, filename)
     f.save(save_path)
 
     conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO user_images(user_id, image_key, filename, uploaded_at)
-      VALUES (?, 'timetable', ?, ?)
-    """, (uid, filename, datetime.now().isoformat(timespec="seconds")))
+    cur = cursor(conn)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    cur.execute(
+        f"INSERT INTO user_images(user_id, image_key, filename, uploaded_at) VALUES ({ph()}, 'timetable', {ph()}, {ph()})",
+        (uid, filename, now)
+    )
     conn.commit()
     conn.close()
 
@@ -611,26 +734,26 @@ def delete_timetable(image_id):
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("""
-      SELECT filename FROM user_images
-      WHERE id=? AND user_id=? AND image_key='timetable'
-    """, (image_id, uid))
-    row = cur.fetchone()
+    cur.execute(
+        f"SELECT filename FROM user_images WHERE id={ph()} AND user_id={ph()} AND image_key='timetable'",
+        (image_id, uid)
+    )
+    row = fetchone(cur)
 
     if not row:
         conn.close()
         return jsonify({"ok": False, "error": "not_found"}), 404
 
-    file_path = os.path.join(UPLOAD_DIR, str(uid), row["filename"])
+    file_path = os.path.join(UPLOAD_DIR, str(uid), row_get(row, "filename"))
     try:
         if os.path.isfile(file_path):
             os.remove(file_path)
     except Exception:
         pass
 
-    cur.execute("DELETE FROM user_images WHERE id=? AND user_id=?", (image_id, uid))
+    cur.execute(f"DELETE FROM user_images WHERE id={ph()} AND user_id={ph()}", (image_id, uid))
     conn.commit()
     conn.close()
 
@@ -657,28 +780,30 @@ def api_stats():
     start_s = date.fromordinal(start_date).isoformat()
 
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("""
+    cur.execute(f"""
       SELECT dl.log_date AS d, COALESCE(SUM(dl.pages_done), 0) AS v
       FROM daily_logs dl
       JOIN plans p ON p.id = dl.plan_id
-      WHERE p.user_id = ?
-        AND dl.log_date >= ?
+      WHERE p.user_id = {ph()}
+        AND dl.log_date >= {ph()}
       GROUP BY dl.log_date
       ORDER BY dl.log_date ASC
     """, (uid, start_s))
-    by_date = [{"date": r["d"], "value": int(r["v"])} for r in cur.fetchall()]
+    by_date_rows = fetchall(cur)
+    by_date = [{"date": row_get(r, "d"), "value": int(row_get(r, "v", 0))} for r in by_date_rows]
 
-    cur.execute("""
+    cur.execute(f"""
       SELECT p.subject AS subject, COALESCE(SUM(dl.pages_done), 0) AS total
       FROM plans p
       LEFT JOIN daily_logs dl ON dl.plan_id = p.id
-      WHERE p.user_id = ?
-      GROUP BY p.id
+      WHERE p.user_id = {ph()}
+      GROUP BY p.id, p.subject
       ORDER BY total DESC, p.subject ASC
     """, (uid,))
-    by_subject = [{"subject": r["subject"], "total": int(r["total"])} for r in cur.fetchall()]
+    by_subject_rows = fetchall(cur)
+    by_subject = [{"subject": row_get(r, "subject"), "total": int(row_get(r, "total", 0))} for r in by_subject_rows]
 
     total_pages_done = sum(x["value"] for x in by_date)
     active_days = sum(1 for x in by_date if x["value"] > 0)
@@ -719,32 +844,32 @@ def api_pattern():
     end_s = end_d.isoformat()
 
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
-    cur.execute("""
+    cur.execute(f"""
       SELECT dl.log_date AS d, COALESCE(SUM(dl.pages_done), 0) AS v
       FROM daily_logs dl
       JOIN plans p ON p.id = dl.plan_id
-      WHERE p.user_id = ?
-        AND dl.log_date >= ?
+      WHERE p.user_id = {ph()}
+        AND dl.log_date >= {ph()}
       GROUP BY dl.log_date
       ORDER BY dl.log_date ASC
     """, (uid, start_s))
-    rows = cur.fetchall()
-
-    by_date = [{"date": r["d"], "value": int(r["v"])} for r in rows]
+    rows = fetchall(cur)
+    by_date = [{"date": row_get(r, "d"), "value": int(row_get(r, "v", 0))} for r in rows]
 
     recent_start = end_d.fromordinal(end_d.toordinal() - 13).isoformat()
-    cur.execute("""
+    cur.execute(f"""
       SELECT dl.log_date AS d, COALESCE(SUM(dl.pages_done), 0) AS v
       FROM daily_logs dl
       JOIN plans p ON p.id = dl.plan_id
-      WHERE p.user_id = ?
-        AND dl.log_date >= ?
+      WHERE p.user_id = {ph()}
+        AND dl.log_date >= {ph()}
       GROUP BY dl.log_date
       ORDER BY dl.log_date ASC
     """, (uid, recent_start))
-    recent = [{"date": r["d"], "value": int(r["v"])} for r in cur.fetchall()]
+    recent_rows = fetchall(cur)
+    recent = [{"date": row_get(r, "d"), "value": int(row_get(r, "v", 0))} for r in recent_rows]
     recent_total = sum(x["value"] for x in recent)
     recent_active_days = sum(1 for x in recent if x["value"] > 0)
     recent_avg_active = (recent_total / recent_active_days) if recent_active_days > 0 else 0.0
@@ -787,25 +912,25 @@ def api_pattern():
 
     weekly_series = [{"label": f"{y}-W{w}", "total": int(week_map.get((y, w), 0))} for (y, w) in weekly]
 
-    cur.execute("SELECT id, subject, pages, dday FROM plans WHERE user_id=? ORDER BY id DESC", (uid,))
-    plans = cur.fetchall()
+    cur.execute(f"SELECT id, subject, pages, dday FROM plans WHERE user_id={ph()} ORDER BY id DESC", (uid,))
+    plans = fetchall(cur)
 
     overload_items = []
     for p in plans:
-        plan_id = p["id"]
-        total_pages = int(p["pages"])
-        dday = parse_yyyy_mm_dd(p["dday"])
+        plan_id = row_get(p, "id")
+        total_pages = int(row_get(p, "pages", 0))
+        dday = parse_yyyy_mm_dd(row_get(p, "dday"))
         days_left = diff_days_inclusive(end_d, dday)
 
-        cur.execute("SELECT COALESCE(SUM(pages_done),0) AS s FROM daily_logs WHERE plan_id=?", (plan_id,))
-        done_total = int(cur.fetchone()["s"])
+        cur.execute(f"SELECT COALESCE(SUM(pages_done),0) AS s FROM daily_logs WHERE plan_id={ph()}", (plan_id,))
+        done_total = int(row_get(fetchone(cur), "s", 0))
         remaining = max(0, total_pages - done_total)
 
         req = None if days_left <= 0 else (remaining / days_left)
 
         overload_items.append({
-            "subject": p["subject"],
-            "dday": p["dday"],
+            "subject": row_get(p, "subject"),
+            "dday": row_get(p, "dday"),
             "days_left": days_left,
             "remaining": remaining,
             "required_per_day": round(req, 2) if req is not None else None
@@ -814,9 +939,9 @@ def api_pattern():
     conn.close()
 
     feedback = []
-
     active_days = sum(1 for x in by_date if x["value"] > 0)
     consistency = active_days / days if days > 0 else 0
+
     if consistency >= 0.7:
         feedback.append(f"최근 {days}일 중 {active_days}일 공부했어요. 대단한 성실성입니다!")
     elif consistency >= 0.4:
@@ -874,12 +999,11 @@ def api_review_get():
         return jsonify({"ok": False, "error": "login_required"}), 401
 
     uid = current_user_id()
-
     q_date = (request.args.get("date") or "").strip()
     q_days = request.args.get("days")
 
     conn = db()
-    cur = conn.cursor()
+    cur = cursor(conn)
 
     # 최근 N일 목록
     if q_days is not None:
@@ -892,24 +1016,24 @@ def api_review_get():
         start_ord = date.today().toordinal() - (days - 1)
         start_s = date.fromordinal(start_ord).isoformat()
 
-        cur.execute("""
+        cur.execute(f"""
           SELECT log_date, goal_met, obstacles, note, created_at, updated_at
           FROM reflections
-          WHERE user_id=? AND log_date >= ?
+          WHERE user_id={ph()} AND log_date >= {ph()}
           ORDER BY log_date DESC
         """, (uid, start_s))
-        rows = cur.fetchall()
+        rows = fetchall(cur)
         conn.close()
 
         items = []
         for r in rows:
             items.append({
-                "log_date": r["log_date"],
-                "goal_met": bool(r["goal_met"]),
-                "obstacles": r["obstacles"],
-                "note": r["note"],
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
+                "log_date": row_get(r, "log_date"),
+                "goal_met": bool(row_get(r, "goal_met", 0)),
+                "obstacles": row_get(r, "obstacles", ""),
+                "note": row_get(r, "note", ""),
+                "created_at": row_get(r, "created_at"),
+                "updated_at": row_get(r, "updated_at"),
             })
 
         return jsonify({"ok": True, "mode": "list", "days": days, "start": start_s, "end": date.today().isoformat(), "items": items})
@@ -924,24 +1048,24 @@ def api_review_get():
         conn.close()
         return jsonify({"ok": False, "error": "date_invalid"}), 400
 
-    cur.execute("""
+    cur.execute(f"""
       SELECT log_date, goal_met, obstacles, note, created_at, updated_at
       FROM reflections
-      WHERE user_id=? AND log_date=?
+      WHERE user_id={ph()} AND log_date={ph()}
     """, (uid, q_date))
-    row = cur.fetchone()
+    row = fetchone(cur)
     conn.close()
 
     if not row:
         return jsonify({"ok": True, "mode": "single", "item": None})
 
     item = {
-        "log_date": row["log_date"],
-        "goal_met": bool(row["goal_met"]),
-        "obstacles": row["obstacles"],
-        "note": row["note"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "log_date": row_get(row, "log_date"),
+        "goal_met": bool(row_get(row, "goal_met", 0)),
+        "obstacles": row_get(row, "obstacles", ""),
+        "note": row_get(row, "note", ""),
+        "created_at": row_get(row, "created_at"),
+        "updated_at": row_get(row, "updated_at"),
     }
     return jsonify({"ok": True, "mode": "single", "item": item})
 
@@ -980,17 +1104,30 @@ def api_review_upsert():
     now = datetime.now().isoformat(timespec="seconds")
 
     conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO reflections(user_id, log_date, goal_met, obstacles, note, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, log_date)
-      DO UPDATE SET
-        goal_met=excluded.goal_met,
-        obstacles=excluded.obstacles,
-        note=excluded.note,
-        updated_at=excluded.updated_at
-    """, (uid, log_date, goal_met_i, obstacles, note, now, now))
+    cur = cursor(conn)
+
+    if using_postgres():
+        cur.execute(f"""
+          INSERT INTO reflections(user_id, log_date, goal_met, obstacles, note, created_at, updated_at)
+          VALUES ({ph()}, {ph()}, {ph()}, {ph()}, {ph()}, {ph()}, {ph()})
+          ON CONFLICT(user_id, log_date)
+          DO UPDATE SET
+            goal_met=EXCLUDED.goal_met,
+            obstacles=EXCLUDED.obstacles,
+            note=EXCLUDED.note,
+            updated_at=EXCLUDED.updated_at
+        """, (uid, log_date, goal_met_i, obstacles, note, now, now))
+    else:
+        cur.execute(f"""
+          INSERT INTO reflections(user_id, log_date, goal_met, obstacles, note, created_at, updated_at)
+          VALUES ({ph()}, {ph()}, {ph()}, {ph()}, {ph()}, {ph()}, {ph()})
+          ON CONFLICT(user_id, log_date)
+          DO UPDATE SET
+            goal_met=excluded.goal_met,
+            obstacles=excluded.obstacles,
+            note=excluded.note,
+            updated_at=excluded.updated_at
+        """, (uid, log_date, goal_met_i, obstacles, note, now, now))
 
     conn.commit()
     conn.close()
@@ -1010,8 +1147,8 @@ def api_review_delete(log_date):
 
     uid = current_user_id()
     conn = db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM reflections WHERE user_id=? AND log_date=?", (uid, log_date))
+    cur = cursor(conn)
+    cur.execute(f"DELETE FROM reflections WHERE user_id={ph()} AND log_date={ph()}", (uid, log_date))
     conn.commit()
     deleted = cur.rowcount
     conn.close()
@@ -1019,17 +1156,11 @@ def api_review_delete(log_date):
 
 
 # =========================
-# ✅ 백업(디스크): DB + 업로드를 ZIP으로 저장
-#  - /admin/backup/run (GET/POST) : 백업 생성
-#  - /admin/backup/list (GET) : 목록
-#  - /admin/backup/download/<name> (GET) : 다운로드
-#  - 최근 BACKUP_KEEP개만 유지(자동 삭제)
+# ✅ 백업(디스크): 업로드 + (SQLite면 DB파일도) ZIP 저장
 # =========================
 def _is_backup_authorized():
-    # 1) 로그인되어 있으면 허용
     if current_user_id():
         return True
-    # 2) 토큰 허용(선택)
     if BACKUP_TOKEN:
         token = request.args.get("token") or request.headers.get("X-Backup-Token")
         if token and token == BACKUP_TOKEN:
@@ -1043,7 +1174,6 @@ def _safe_backup_name(name: str) -> str:
 
 
 def prune_backups(keep: int = 30):
-    """BACKUP_DIR 안의 zip 백업을 최근 keep개만 남기고 삭제"""
     try:
         files = []
         for fn in os.listdir(BACKUP_DIR):
@@ -1073,8 +1203,11 @@ def create_backup_zip() -> dict:
     fpath = os.path.join(BACKUP_DIR, fname)
 
     with zipfile.ZipFile(fpath, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        if os.path.isfile(DB):
+        # ✅ SQLite일 때만 DB 파일 포함 (Postgres는 파일 DB가 아니라 원격 DB)
+        if (not using_postgres()) and os.path.isfile(DB):
             z.write(DB, arcname="planner.db")
+        else:
+            z.writestr("DB_INFO.txt", "Postgres 사용 중: DATABASE_URL 기반 원격 DB이므로 zip에 DB파일이 포함되지 않습니다.\n")
 
         if os.path.isdir(UPLOAD_DIR):
             for root, _, files in os.walk(UPLOAD_DIR):
@@ -1086,7 +1219,7 @@ def create_backup_zip() -> dict:
     prune_backups(keep=BACKUP_KEEP)
 
     size = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
-    return {"filename": fname, "bytes": size, "kept": BACKUP_KEEP}
+    return {"filename": fname, "bytes": size, "kept": BACKUP_KEEP, "db_included": (not using_postgres())}
 
 
 @app.route("/admin/backup/run", methods=["GET", "POST"])
@@ -1134,5 +1267,4 @@ def admin_backup_download(name):
 
 
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True)
