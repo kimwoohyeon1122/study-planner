@@ -1,0 +1,262 @@
+<!-- templates/feature_review.html : 기능4 "회고 노트" (통파일) -->
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .row > * { flex: 1 1 auto; }
+  .row .btn, .row .btn-ghost { flex: 0 0 auto; }
+
+  .tiny { font-size:12px; color:#6b7280; }
+  .mono { font-variant-numeric: tabular-nums; }
+
+  .tagbox { display:flex; gap:8px; flex-wrap:wrap; }
+  .tag {
+    display:inline-flex; align-items:center; gap:6px;
+    padding:8px 10px; border:1px solid #e5e7eb; border-radius:999px;
+    background:#fff; cursor:pointer; user-select:none;
+    font-size:13px;
+  }
+  .tag input{ width:auto; }
+  textarea{
+    min-height: 120px;
+    resize: vertical;
+  }
+  .panel{
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    padding:14px;
+    background:#fff;
+  }
+  .list{
+    display:grid;
+    gap:10px;
+  }
+  .item{
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    padding:12px;
+    background:#fff;
+  }
+  .item-top{
+    display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+    align-items:center;
+  }
+  @media (max-width: 840px){
+    .grid2{ grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="card">
+  <h2 style="margin:0;">✍️ 성찰 노트</h2>
+  <div style="height:10px;"></div>
+  <div class="tiny">하루 3분 성찰로 공부 패턴을 더 정확히 파악할 수 있어요.</div>
+
+  <div style="height:14px;"></div>
+
+  <div class="grid2">
+    <!-- 작성/수정 -->
+    <div class="panel">
+      <div class="row">
+        <div style="min-width:220px;">
+          <div class="tiny">날짜</div>
+          <input id="logDate" type="date">
+        </div>
+
+        <div style="min-width:220px;">
+          <div class="tiny">목표 달성</div>
+          <select id="goalMet">
+            <option value="1">달성했어요 ✅</option>
+            <option value="0">미달했어요 ❌</option>
+          </select>
+        </div>
+
+        <button class="btn" id="saveBtn">저장</button>
+        <button class="btn-ghost" id="loadBtn">불러오기</button>
+      </div>
+
+      <div style="height:12px;"></div>
+
+      <div class="tiny" style="margin-bottom:6px;">방해 요인 (체크)</div>
+      <div class="tagbox" id="tags">
+        <label class="tag"><input type="checkbox" value="피로"> 피로</label>
+        <label class="tag"><input type="checkbox" value="산만함"> 산만함</label>
+        <label class="tag"><input type="checkbox" value="시간부족"> 시간부족</label>
+        <label class="tag"><input type="checkbox" value="난이도"> 난이도</label>
+        <label class="tag"><input type="checkbox" value="스마트폰"> 스마트폰</label>
+        <label class="tag"><input type="checkbox" value="컨디션"> 컨디션</label>
+      </div>
+
+      <div style="height:12px;"></div>
+
+      <div class="tiny" style="margin-bottom:6px;">회고 메모</div>
+      <textarea id="note" placeholder="오늘은 어떤 점이 잘 됐고, 무엇을 바꿔볼까요? (간단히)"></textarea>
+
+      <div style="height:10px;"></div>
+      <div id="msg" class="tiny"></div>
+    </div>
+
+    <!-- 최근 회고 목록 -->
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;">
+        <div>
+          <div style="font-weight:800;">최근 회고</div>
+          <div class="tiny">최근 30일 중 작성된 회고만 표시</div>
+        </div>
+        <button class="btn-ghost" id="refreshList">새로고침</button>
+      </div>
+
+      <div style="height:10px;"></div>
+      <div class="list" id="list"></div>
+    </div>
+  </div>
+
+  <div style="height:12px;"></div>
+  <div class="tiny">
+    * “불러오기”로 과거 날짜를 수정할 수 있어요. (사용자별·날짜별 1개 저장)
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  async function api(url, opts){
+    const res = await fetch(url, opts || {});
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function todayStr(){
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    return yyyy + "-" + mm + "-" + dd;
+  }
+
+  function getCheckedObstacles(){
+    const boxes = document.querySelectorAll('#tags input[type="checkbox"]');
+    const arr = [];
+    boxes.forEach(b => { if(b.checked) arr.push(b.value); });
+    return arr.join(",");
+  }
+
+  function setCheckedObstacles(csv){
+    const boxes = document.querySelectorAll('#tags input[type="checkbox"]');
+    const set = new Set((csv || "").split(",").map(x => x.trim()).filter(Boolean));
+    boxes.forEach(b => { b.checked = set.has(b.value); });
+  }
+
+  async function loadOne(){
+    const d = $("logDate").value || todayStr();
+    $("msg").textContent = "불러오는 중...";
+    const data = await api("/api/review?date=" + encodeURIComponent(d));
+
+    if(!data.item){
+      $("goalMet").value = "1";
+      setCheckedObstacles("");
+      $("note").value = "";
+      $("msg").textContent = "저장된 회고가 없어요. 새로 작성해보세요!";
+      return;
+    }
+
+    $("goalMet").value = data.item.goal_met ? "1" : "0";
+    setCheckedObstacles(data.item.obstacles || "");
+    $("note").value = data.item.note || "";
+    $("msg").textContent = "불러오기 완료!";
+  }
+
+  async function saveOne(){
+    const log_date = $("logDate").value || todayStr();
+    const goal_met = $("goalMet").value === "1";
+    const obstacles = getCheckedObstacles();
+    const note = $("note").value || "";
+
+    $("msg").textContent = "저장 중...";
+    await api("/api/review", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ log_date, goal_met, obstacles, note })
+    });
+    $("msg").textContent = "저장 완료!";
+    await loadList();
+  }
+
+  function escHtml(s){
+    return (s ?? "").toString()
+      .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+  }
+
+  async function loadList(){
+    const data = await api("/api/review?days=30");
+    const list = $("list");
+    list.innerHTML = "";
+
+    const items = data.items || [];
+    if(items.length === 0){
+      list.innerHTML = '<div class="tiny">최근 30일 동안 작성된 회고가 없어요.</div>';
+      return;
+    }
+
+    items.forEach(it => {
+      const div = document.createElement("div");
+      div.className = "item";
+
+      const badge = it.goal_met ? "✅ 달성" : "❌ 미달";
+      const obs = (it.obstacles || "").trim();
+      const obsText = obs ? obs.split(",").map(x => x.trim()).filter(Boolean).join(" · ") : "—";
+
+      div.innerHTML = `
+        <div class="item-top">
+          <div class="mono"><b>${escHtml(it.log_date)}</b> · <span>${badge}</span></div>
+          <div class="row" style="gap:8px;">
+            <button class="btn-ghost" data-open="${escHtml(it.log_date)}">열기</button>
+            <button class="btn-ghost" data-del="${escHtml(it.log_date)}">삭제</button>
+          </div>
+        </div>
+        <div style="height:8px;"></div>
+        <div class="tiny">방해 요인: ${escHtml(obsText)}</div>
+        <div style="height:8px;"></div>
+        <div>${escHtml(it.note || "—")}</div>
+      `;
+      list.appendChild(div);
+    });
+
+    document.querySelectorAll("[data-open]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        $("logDate").value = btn.getAttribute("data-open");
+        await loadOne();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    });
+
+    document.querySelectorAll("[data-del]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const d = btn.getAttribute("data-del");
+        if(!confirm(d + " 회고를 삭제할까요?")) return;
+        try{
+          $("msg").textContent = "삭제 중...";
+          await api("/api/review/" + encodeURIComponent(d), { method: "DELETE" });
+          $("msg").textContent = "삭제 완료!";
+          await loadList();
+        }catch(e){
+          $("msg").textContent = "삭제 실패: " + e.message;
+        }
+      });
+    });
+  }
+
+  // init
+  $("logDate").value = todayStr();
+  $("saveBtn").addEventListener("click", () => saveOne().catch(e => $("msg").textContent = "저장 실패: " + e.message));
+  $("loadBtn").addEventListener("click", () => loadOne().catch(e => $("msg").textContent = "불러오기 실패: " + e.message));
+  $("refreshList").addEventListener("click", () => loadList().catch(e => $("msg").textContent = "목록 로드 실패: " + e.message));
+
+  loadOne().catch(() => {});
+  loadList().catch(() => {});
+</script>
+
+{% endblock %}

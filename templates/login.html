@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<div class="card" style="max-width:520px; margin:0 auto;">
+  <h2 style="margin:0 0 12px;">로그인</h2>
+
+  <form method="post">
+    <div style="margin-bottom:10px;">
+      <input name="username" placeholder="아이디" autocomplete="username" required>
+    </div>
+    <div style="margin-bottom:12px;">
+      <input name="password" type="password" placeholder="비밀번호" autocomplete="current-password" required>
+    </div>
+    <button class="btn" style="width:100%;">로그인</button>
+  </form>
+
+  <div style="height:12px;"></div>
+  <div style="font-size:13px; color:#6b7280;">
+    계정이 없나요? <a href="{{ url_for('register') }}" style="text-decoration:underline;">회원가입</a>
+  </div>
+</div>
+
+{% endblock %}

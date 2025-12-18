@@ -1,0 +1,87 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  .dash-grid{
+    display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap:14px;
+  }
+  .dash-card{
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    padding:16px;
+    background:#fff;
+    cursor:pointer;
+    transition: transform .15s ease, box-shadow .15s ease;
+    min-height:110px;
+    display:flex;
+    flex-direction:column;
+    justify-content:space-between;
+  }
+  .dash-card:hover{
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.08);
+  }
+  .dash-card h3{ margin:0 0 6px; font-size:18px; }
+  .dash-card p{ margin:0; font-size:13px; color:#6b7280; line-height:1.35; }
+  .tag{ margin-top:10px; font-size:12px; color:#6b7280; }
+</style>
+
+<div class="card">
+  <h2 style="margin:0 0 12px;">📌 메뉴</h2>
+
+  <div class="dash-grid">
+
+    <!-- 기능1: 스터디 플래너 -->
+    <div class="dash-card" onclick="location.href='{{ url_for('planner') }}'">
+      <div>
+        <h3>📝 스터디 플래너</h3>
+        <p>D-day 목표 계산 + 오늘 공부 저장<br>미달 시 다음날 목표에 반영</p>
+      </div>
+    </div>
+
+    <!-- 기능2: 공부 통계 -->
+    <div class="dash-card" onclick="location.href='{{ url_for('feature2') }}'">
+      <div>
+        <h3>📊 공부 통계</h3>
+        <p>날짜별 히트맵 + 과목별 누적<br>총량·평균 KPI 분석</p>
+      </div>
+    </div>
+
+    <!-- 기능3: 패턴 분석 -->
+    <div class="dash-card" onclick="location.href='{{ url_for('feature3') }}'">
+      <div>
+        <h3>🧭 패턴 분석</h3>
+        <p>요일·주간 추세 분석<br>자동 피드백 & 과부하 경고</p>
+      </div>
+    </div>
+
+    <!-- 기능4: 회고 노트 -->
+    <div class="dash-card" onclick="location.href='{{ url_for('feature4') }}'">
+      <div>
+        <h3>✍️ 성찰 노트</h3>
+        <p>하루 3분 성찰 기록<br>목표 달성·방해 요인·메모</p>
+      </div>
+    </div>
+
+    <!-- ✅ 기능5: 집중 타이머 (신규 추가) -->
+    <div class="dash-card" onclick="location.href='{{ url_for('feature5') }}'">
+      <div>
+        <h3>⏱️ 집중 타이머</h3>
+        <p>25·50분 집중<br>종료 후 공부 기록 자동 연결</p>
+      </div>
+    </div>
+
+    <!-- 시간표 이미지 -->
+    <div class="dash-card" onclick="location.href='{{ url_for('feature1') }}'">
+      <div>
+        <h3>🗓️ 이미지 저장소</h3>
+        <p>시간표·참고자료 이미지<br>여러 장 업로드 + 확대 보기</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}

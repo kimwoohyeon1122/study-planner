@@ -1,0 +1,165 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  .grid{ display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  @media (max-width: 900px){ .grid{ grid-template-columns: 1fr; } }
+  .panel{ border:1px solid #e5e7eb; border-radius:14px; padding:12px; background:#fff; }
+  .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+  .muted{ color:#6b7280; font-size:12px; }
+  .mono{ font-variant-numeric: tabular-nums; }
+  .kpis{ display:flex; gap:10px; flex-wrap:wrap; }
+  .kpi{ border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; min-width:160px; }
+  .kpi .v{ font-size:18px; font-weight:700; }
+  .bar-row{ display:grid; grid-template-columns: 44px 1fr 90px; gap:10px; align-items:center; padding:7px 0; border-bottom:1px dashed #e5e7eb; }
+  .bar-row:last-child{ border-bottom:0; }
+  .bar-bg{ background:#f3f4f6; border-radius:8px; height:10px; overflow:hidden; }
+  .bar{ background:#111827; height:10px; border-radius:8px; width:0%; }
+  .list{ margin:0; padding-left:18px; }
+</style>
+
+<div class="card">
+  <h2 style="margin:0;">🧭 공부 패턴 분석 & 피드백</h2>
+  <div class="muted" style="margin-top:6px;">플래너에 저장된 “오늘 공부(페이지)” 기록으로 자동 분석합니다.</div>
+
+  <div style="height:12px;"></div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="kpis">
+        <div class="kpi">
+          <div class="v mono" id="kActive">-</div>
+          <div class="muted">공부한 날 수</div>
+        </div>
+        <div class="kpi">
+          <div class="v mono" id="kRecentAvg">-</div>
+          <div class="muted">최근 14일 평균(공부한 날 기준)</div>
+        </div>
+        <div class="kpi">
+          <div class="v mono" id="kRange">-</div>
+          <div class="muted">분석 기간</div>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <span class="muted">기간</span>
+        <select id="daysSel">
+          <option value="30">최근 30일</option>
+          <option value="60">최근 60일</option>
+          <option value="90" selected>최근 90일</option>
+          <option value="120">최근 120일</option>
+          <option value="180">최근 180일</option>
+        </select>
+        <button class="btn" id="reloadBtn">새로고침</button>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:12px;"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <div style="font-weight:700;">요일별 평균(공부한 날 기준)</div>
+      <div class="muted">각 요일에 “공부한 날”만 평균에 포함됩니다.</div>
+      <div id="weekdayBars" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:700;">최근 8주 추세(주간 총합)</div>
+      <div class="muted">주 단위로 합산한 공부량입니다.</div>
+      <div id="weeklyBars" style="margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <div style="height:12px;"></div>
+
+  <div class="panel">
+    <div style="font-weight:700;">자동 피드백</div>
+    <ul class="list" id="feedback" style="margin-top:10px;"></ul>
+  </div>
+
+  <div id="msg" class="muted" style="margin-top:12px;"></div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function barRow(label, valueText, ratio){
+    const row = document.createElement("div");
+    row.className = "bar-row";
+
+    const left = document.createElement("div");
+    left.textContent = label;
+
+    const bg = document.createElement("div");
+    bg.className = "bar-bg";
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.width = Math.round(ratio * 100) + "%";
+    bg.appendChild(bar);
+
+    const right = document.createElement("div");
+    right.className = "mono muted";
+    right.style.textAlign = "right";
+    right.textContent = valueText;
+
+    row.appendChild(left);
+    row.appendChild(bg);
+    row.appendChild(right);
+    return row;
+  }
+
+  async function load(){
+    const days = $("daysSel").value;
+    $("msg").textContent = "불러오는 중...";
+
+    const res = await fetch(`/api/pattern?days=${encodeURIComponent(days)}`);
+    const data = await res.json();
+
+    if(!res.ok || !data.ok){
+      $("msg").textContent = "실패: " + (data.error || "unknown");
+      return;
+    }
+
+    $("kActive").textContent = data.active_days + "일";
+    $("kRecentAvg").textContent = (data.recent14_avg_active || 0) + "p";
+    $("kRange").textContent = `${data.start} ~ ${data.end}`;
+
+    const w = data.weekday || [];
+    const maxAvg = Math.max(0, ...w.map(x => x.avg_active || 0));
+    const wrapW = $("weekdayBars");
+    wrapW.innerHTML = "";
+    w.forEach(x => {
+      const ratio = maxAvg > 0 ? (x.avg_active / maxAvg) : 0;
+      wrapW.appendChild(barRow(x.weekday, `${x.avg_active}p (총 ${x.total}p / ${x.days}일)`, ratio));
+    });
+
+    const wk = data.weekly || [];
+    const maxWk = Math.max(0, ...wk.map(x => x.total || 0));
+    const wrapWK = $("weeklyBars");
+    wrapWK.innerHTML = "";
+    wk.forEach(x => {
+      const ratio = maxWk > 0 ? (x.total / maxWk) : 0;
+      const shortLabel = x.label.split("-W").pop();
+      wrapWK.appendChild(barRow("W" + shortLabel, `${x.total}p`, ratio));
+    });
+
+    const fb = data.feedback || [];
+    const ul = $("feedback");
+    ul.innerHTML = "";
+    fb.forEach(t => {
+      const li = document.createElement("li");
+      li.innerHTML = t;
+      ul.appendChild(li);
+    });
+
+    $("msg").textContent = "완료";
+  }
+
+  $("reloadBtn").addEventListener("click", load);
+  $("daysSel").addEventListener("change", load);
+  load();
+</script>
+
+{% endblock %}

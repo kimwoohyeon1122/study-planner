@@ -1,0 +1,216 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  .stats-grid{ display:grid; grid-template-columns: 1.2fr 0.8fr; gap:12px; }
+  @media (max-width: 900px){ .stats-grid{ grid-template-columns: 1fr; } }
+
+  .panel{ border:1px solid #e5e7eb; border-radius:14px; padding:12px; background:#fff; }
+  .muted{ color:#6b7280; font-size:12px; }
+  .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+  .kpi{ display:flex; gap:12px; flex-wrap:wrap; }
+  .kpi .box{ border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; min-width:160px; }
+  .kpi .v{ font-size:18px; font-weight:700; font-variant-numeric: tabular-nums; }
+
+  .heatmap-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .heatmap{
+    display:grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 12px;
+    grid-template-rows: repeat(7, 12px);
+    gap:3px;
+  }
+  .cell{ width:12px; height:12px; border-radius:3px; background:#f3f4f6; border:1px solid rgba(0,0,0,0.03); }
+  .legend{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .legend .sw{ width:12px; height:12px; border-radius:3px; border:1px solid rgba(0,0,0,0.03); }
+
+  .bar-row{
+    display:grid;
+    grid-template-columns: 1fr 3fr auto;
+    gap:10px;
+    align-items:center;
+    padding:8px 0;
+    border-bottom:1px dashed #e5e7eb;
+  }
+  .bar-row:last-child{ border-bottom:0; }
+  .bar{ height:10px; border-radius:6px; background:#111827; }
+</style>
+
+<div class="card">
+  <h2 style="margin:0;">📊 공부 기록 & 통계</h2>
+  <div class="muted" style="margin-top:6px;">플래너에서 저장한 “오늘 공부” 기록을 기반으로 집계합니다.</div>
+
+  <div style="height:12px;"></div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="kpi">
+        <div class="box">
+          <div class="v" id="kpiTotal">-</div>
+          <div class="muted">최근 기간 총 공부량(페이지)</div>
+        </div>
+        <div class="box">
+          <div class="v" id="kpiDays">-</div>
+          <div class="muted">공부한 날 수</div>
+        </div>
+        <div class="box">
+          <div class="v" id="kpiAvg">-</div>
+          <div class="muted">공부한 날 기준 평균(페이지)</div>
+        </div>
+      </div>
+
+      <div class="row" style="justify-content:flex-end;">
+        <span class="muted">기간</span>
+        <select id="daysSel">
+          <option value="30">최근 30일</option>
+          <option value="60">최근 60일</option>
+          <option value="120" selected>최근 120일</option>
+          <option value="180">최근 180일</option>
+          <option value="365">최근 365일</option>
+        </select>
+        <button class="btn" id="reloadBtn">새로고침</button>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:12px;"></div>
+
+  <div class="stats-grid">
+    <div class="panel">
+      <div class="row">
+        <div>
+          <div style="font-weight:700;">히트맵(날짜별 공부량)</div>
+          <div class="muted">0이면 연한색, 많이 할수록 진해집니다.</div>
+        </div>
+        <div class="legend muted" id="legend"></div>
+      </div>
+
+      <div style="height:10px;"></div>
+      <div class="heatmap-wrap"><div class="heatmap" id="heatmap"></div></div>
+      <div class="muted" style="margin-top:10px;">셀에 마우스를 올리면 날짜/페이지가 표시됩니다.</div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:700;">과목별 누적(페이지)</div>
+      <div class="muted">플래너에 등록된 과목 기준입니다.</div>
+      <div style="height:10px;"></div>
+      <div id="bars"></div>
+    </div>
+  </div>
+
+  <div id="msg" class="muted" style="margin-top:12px;"></div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  function isoToDate(d){ return new Date(d + "T00:00:00"); }
+  function fmt(iso){ return iso.replaceAll("-", "."); }
+  function dayIndexMon0(dateObj){ const d = dateObj.getDay(); return (d + 6) % 7; }
+  function clamp(n,a,b){ return Math.max(a, Math.min(b, n)); }
+  function shade(level){
+    const colors = ["#f3f4f6", "#dbeafe", "#93c5fd", "#3b82f6", "#1d4ed8"];
+    return colors[clamp(level,0,4)];
+  }
+  function buildLegend(){
+    const el = $("legend"); el.innerHTML = "";
+    el.append("적음");
+    for(let i=0;i<5;i++){
+      const sw = document.createElement("span");
+      sw.className = "sw";
+      sw.style.background = shade(i);
+      el.appendChild(sw);
+    }
+    el.append("많음");
+  }
+  function makeHeatmap(byDate, startIso, endIso){
+    const map = new Map(); byDate.forEach(x => map.set(x.date, x.value));
+    const start = isoToDate(startIso); const end = isoToDate(endIso);
+    const startDow = dayIndexMon0(start); start.setDate(start.getDate() - startDow);
+
+    const cells=[]; const values=[];
+    for(let d = new Date(start); d <= end; d.setDate(d.getDate()+1)){
+      const iso = d.toISOString().slice(0,10);
+      const v = map.get(iso) ?? 0;
+      cells.push({ iso, v }); values.push(v);
+    }
+    const maxV = Math.max(0, ...values);
+    const p25 = maxV * 0.25, p50 = maxV * 0.50, p75 = maxV * 0.75;
+
+    const hm = $("heatmap"); hm.innerHTML = "";
+    cells.forEach(c => {
+      let lvl = 0;
+      if(c.v===0) lvl=0;
+      else if(c.v<=p25) lvl=1;
+      else if(c.v<=p50) lvl=2;
+      else if(c.v<=p75) lvl=3;
+      else lvl=4;
+
+      const div = document.createElement("div");
+      div.className = "cell";
+      div.style.background = shade(lvl);
+      div.title = `${fmt(c.iso)} · ${c.v}p`;
+      hm.appendChild(div);
+    });
+  }
+  function renderBars(bySubject){
+    const wrap = $("bars"); wrap.innerHTML = "";
+    const items = bySubject.filter(x => (x.total ?? 0) > 0);
+    if(items.length === 0){
+      wrap.innerHTML = `<div class="muted">아직 기록이 없습니다. 플래너에서 “저장”을 눌러 기록을 쌓아보세요.</div>`;
+      return;
+    }
+    const maxT = Math.max(...items.map(x => x.total));
+    items.slice(0, 12).forEach(x => {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+
+      const name = document.createElement("div");
+      name.textContent = x.subject;
+
+      const barWrap = document.createElement("div");
+      barWrap.style.background = "#f3f4f6";
+      barWrap.style.borderRadius = "6px";
+      barWrap.style.height = "10px";
+      barWrap.style.overflow = "hidden";
+
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      bar.style.width = `${Math.round((x.total / maxT) * 100)}%`;
+
+      const val = document.createElement("div");
+      val.className = "muted";
+      val.style.fontVariantNumeric = "tabular-nums";
+      val.textContent = `${x.total}p`;
+
+      barWrap.appendChild(bar);
+      row.appendChild(name);
+      row.appendChild(barWrap);
+      row.appendChild(val);
+      wrap.appendChild(row);
+    });
+  }
+  async function loadStats(){
+    const days = $("daysSel").value;
+    $("msg").textContent = "불러오는 중...";
+    const res = await fetch(`/api/stats?days=${encodeURIComponent(days)}`);
+    const data = await res.json();
+    if(!res.ok || !data.ok){
+      $("msg").textContent = "불러오기 실패: " + (data.error || "unknown");
+      return;
+    }
+    $("msg").textContent = `${data.start} ~ ${data.end} 기준`;
+    $("kpiTotal").textContent = data.total_pages_done + "p";
+    $("kpiDays").textContent = data.active_days + "일";
+    const avg = data.active_days > 0 ? (data.total_pages_done / data.active_days) : 0;
+    $("kpiAvg").textContent = avg.toFixed(1) + "p";
+
+    buildLegend();
+    makeHeatmap(data.by_date, data.start, data.end);
+    renderBars(data.by_subject);
+  }
+  $("reloadBtn").addEventListener("click", loadStats);
+  $("daysSel").addEventListener("change", loadStats);
+  loadStats();
+</script>
+
+{% endblock %}

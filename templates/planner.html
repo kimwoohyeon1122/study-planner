@@ -1,0 +1,239 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  .row-wrap { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row-wrap > * { flex: 1 1 auto; }
+  .row-wrap .btn { flex: 0 0 auto; }
+
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  table { width:100%; border-collapse:collapse; min-width:860px; }
+  th, td { border-bottom:1px solid #e5e7eb; padding:10px 8px; vertical-align:middle; }
+  th { text-align:left; font-size:13px; color:#6b7280; font-weight:600; }
+
+  .tiny { font-size:12px; color:#6b7280; }
+  .mono { font-variant-numeric: tabular-nums; }
+  .today-input { width: 90px; max-width:100%; }
+
+  .cell-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+
+  @media (max-width: 720px) {
+    table { min-width: 0; }
+    .table-wrap { overflow-x: visible; }
+    table thead { display:none; }
+    table, tbody, tr, td { display:block; width:100%; }
+
+    tr{
+      border:1px solid #e5e7eb;
+      border-radius:14px;
+      padding:10px 12px;
+      margin:10px 0;
+      background:#fff;
+    }
+    td{
+      border:0 !important;
+      padding:8px 0 !important;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    td::before{
+      content: attr(data-label);
+      font-size:12px;
+      color:#6b7280;
+      min-width:110px;
+      flex:0 0 auto;
+    }
+    td > * { flex:1 1 auto; }
+    .today-input{ width:100%; }
+    .cell-actions{ justify-content:flex-start; }
+  }
+</style>
+
+<div class="card">
+  <h2 style="margin:0;">D-day 공부 플래너 (오늘 이행 반영)</h2>
+  <div style="height:12px;"></div>
+
+  <div class="row-wrap">
+    <input id="subject" type="text" placeholder="과목명 (예: 수학)" />
+    <input id="pages" type="number" placeholder="총 페이지 (예: 240)" min="1" />
+    <input id="dday" type="date" />
+    <button class="btn" id="addBtn">추가</button>
+  </div>
+
+  <div style="height:10px;"></div>
+  <div id="summary" class="tiny">불러오는 중...</div>
+
+  <div style="height:10px;"></div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:120px;">과목</th>
+          <th style="width:150px;">진행(누적)</th>
+          <th style="width:150px;">D-day/남은일</th>
+          <th style="width:140px;">오늘 목표(추천)</th>
+          <th style="width:220px;">오늘 공부</th>
+          <th style="width:90px;">이행</th>
+          <th style="width:120px; text-align:right;">삭제</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div style="height:10px;"></div>
+  <div class="tiny">
+    * “오늘 공부”를 입력하고 저장하면 ✅/❌로 표시됩니다. 미달이면 남은 페이지가 줄지 않아 내일 목표가 자동으로 커져서 반영됩니다.
+  </div>
+
+  <div id="msg" class="tiny" style="margin-top:10px;"></div>
+</div>
+
+<script>
+  // Jinja2와 JS 템플릿 리터럴 충돌 방지를 위해 전체 스크립트를 raw로 감쌉니다.
+  {% raw %}
+  const $ = (id) => document.getElementById(id);
+
+  function fmtDday(yyyy_mm_dd){
+    if(!yyyy_mm_dd) return "";
+    return yyyy_mm_dd.replaceAll("-", ".");
+  }
+  function escHtml(s){
+    return (s ?? "").toString()
+      .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+  }
+  async function api(url, opts={}){
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(()=> ({}));
+    if(!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+  function badge(met){ return met ? "✅" : "❌"; }
+
+  function render(data){
+    const rowsEl = $("rows");
+    rowsEl.innerHTML = "";
+
+    const items = data.items || [];
+    const today = data.today || "";
+
+    const count = items.length;
+    const remainSum = items.reduce((acc, it)=> acc + (it.remaining || 0), 0);
+    $("summary").textContent = `오늘(${today}) · 과목 ${count}개 · 남은 페이지 합계 ${remainSum}p`;
+
+    for(const it of items){
+      const targetText = (it.target_min == null)
+        ? "—"
+        : (it.target_min === it.target_max ? `${it.target_min}p/일` : `${it.target_min}~${it.target_max}p/일`);
+
+      const progressText = `<div class="mono"><b>${it.done_total}</b> / ${it.total_pages}p</div>
+                            <div class="tiny">남은 ${it.remaining}p</div>`;
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td data-label="과목"><b>${escHtml(it.subject)}</b></td>
+        <td data-label="진행(누적)">${progressText}</td>
+        <td data-label="D-day/남은일">
+          <div class="mono">${fmtDday(it.dday)}</div>
+          <div class="tiny">D-${it.days_left}</div>
+        </td>
+        <td data-label="오늘 목표(추천)">
+          <div class="mono"><b>${targetText}</b></div>
+        </td>
+        <td data-label="오늘 공부">
+          <div class="row-wrap" style="gap:8px;">
+            <input class="today-input" type="number" min="0" value="${it.done_today || 0}" data-plan="${it.plan_id}" />
+            <button class="btn" data-save="${it.plan_id}">저장</button>
+          </div>
+        </td>
+        <td data-label="이행" class="mono" style="font-size:18px;">${badge(it.met_today)}</td>
+        <td data-label="삭제">
+          <div class="cell-actions">
+            <button class="btn-ghost" data-del="${it.plan_id}">삭제</button>
+          </div>
+        </td>
+      `;
+      rowsEl.appendChild(tr);
+    }
+
+    document.querySelectorAll("[data-save]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        const planId = btn.getAttribute("data-save");
+        const input = document.querySelector(`input[data-plan="${planId}"]`);
+        const val = input ? Number(input.value || 0) : 0;
+
+        try{
+          $("msg").textContent = "저장 중...";
+          await api("/api/log", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ plan_id: planId, pages_done: val })
+          });
+          $("msg").textContent = "저장 완료!";
+          await load();
+        }catch(e){
+          $("msg").textContent = "저장 실패: " + e.message;
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-del]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        const planId = btn.getAttribute("data-del");
+        if(!confirm("이 과목을 삭제할까요? (기록도 함께 삭제됩니다)")) return;
+
+        try{
+          $("msg").textContent = "삭제 중...";
+          await api(`/api/plans/${planId}`, { method:"DELETE" });
+          $("msg").textContent = "삭제 완료!";
+          await load();
+        }catch(e){
+          $("msg").textContent = "삭제 실패: " + e.message;
+        }
+      });
+    });
+  }
+
+  async function load(){
+    const data = await api("/api/today");
+    render(data);
+  }
+
+  $("addBtn").addEventListener("click", async ()=>{
+    const subject = $("subject").value.trim();
+    const pages = Number($("pages").value);
+    const dday = $("dday").value;
+
+    if(!subject){ $("msg").textContent = "과목명을 입력하세요."; return; }
+    if(!pages || pages <= 0){ $("msg").textContent = "총 페이지 수를 올바르게 입력하세요."; return; }
+    if(!dday){ $("msg").textContent = "D-day 날짜를 선택하세요."; return; }
+
+    try{
+      $("msg").textContent = "추가 중...";
+      await api("/api/plans", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ subject, pages, dday })
+      });
+      $("subject").value = "";
+      $("pages").value = "";
+      $("msg").textContent = "추가 완료!";
+      await load();
+    }catch(e){
+      $("msg").textContent = "추가 실패: " + e.message;
+    }
+  });
+
+  load().catch(e=>{
+    $("summary").textContent = "불러오기 실패";
+    $("msg").textContent = "오류: " + e.message;
+  });
+  {% endraw %}
+</script>
+
+{% endblock %}

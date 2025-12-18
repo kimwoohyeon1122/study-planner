@@ -1,0 +1,22 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<div class="card">
+  <h2 style="margin:0 0 10px;">스터디 플래너</h2>
+  <p style="margin:0; color:#6b7280;">
+    D-day 기반 공부 계획 + 기록/통계/패턴 분석까지 한 곳에서 관리합니다.
+  </p>
+
+  <div style="height:14px;"></div>
+
+  {% if session.get("user_id") %}
+    <a class="btn" href="{{ url_for('dashboard') }}">메뉴로 이동</a>
+  {% else %}
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a class="btn" href="{{ url_for('login') }}">로그인</a>
+      <a class="btn-ghost" href="{{ url_for('register') }}">회원가입</a>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

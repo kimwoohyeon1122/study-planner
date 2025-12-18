@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads / Data
+static/uploads/
+data/
