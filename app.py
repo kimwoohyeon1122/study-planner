@@ -21,7 +21,7 @@ app = Flask(__name__)
 # - UPLOAD_DIR: 업로드 파일 위치(기본: DATA_DIR/uploads)
 # - BACKUP_DIR: 백업 zip 위치(기본: DATA_DIR/backups)
 # =========================
-app.secret_key = os.environ.get("SECRET_KEY", "CHANGE_THIS_TO_RANDOM_32+_CHARS")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(app.root_path, "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
