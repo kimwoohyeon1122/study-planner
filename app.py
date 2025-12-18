@@ -10,6 +10,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from datetime import datetime, date
 import zipfile
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
@@ -22,6 +24,8 @@ app = Flask(__name__)
 # - BACKUP_DIR: 백업 zip 위치(기본: DATA_DIR/backups)
 # =========================
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(app.root_path, "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -53,6 +57,9 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 # DB helpers
 # =========================
 def db():
+    if DATABASE_URL:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        return conn
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     return conn
@@ -62,67 +69,79 @@ def init_db():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      pw_hash TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    )
-    """)
+    if DATABASE_URL:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        pw_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+        )
+        """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS plans (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      subject TEXT NOT NULL,
-      pages INTEGER NOT NULL,
-      dday TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        subject TEXT NOT NULL,
+        pages INTEGER NOT NULL,
+        dday TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS daily_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      plan_id INTEGER NOT NULL,
-      log_date TEXT NOT NULL,          -- YYYY-MM-DD
-      pages_done INTEGER NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE(plan_id, log_date),
-      FOREIGN KEY(plan_id) REFERENCES plans(id)
-    )
-    """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL,
+        log_date TEXT NOT NULL,          -- YYYY-MM-DD
+        pages_done INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(plan_id, log_date),
+        FOREIGN KEY(plan_id) REFERENCES plans(id)
+        )
+        """)
 
-    # ✅ 사용자별 이미지 저장(여러 장 누적 저장 가능)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS user_images (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      image_key TEXT NOT NULL,          -- 예: 'timetable'
-      filename TEXT NOT NULL,           -- 저장된 파일명
-      uploaded_at TEXT NOT NULL,
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
+        # ✅ 사용자별 이미지 저장(여러 장 누적 저장 가능)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        image_key TEXT NOT NULL,          -- 예: 'timetable'
+        filename TEXT NOT NULL,           -- 저장된 파일명
+        uploaded_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """)
 
-    # ✅ 기능4: 학습 회고 노트 (날짜별 1개, 사용자별)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS reflections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      log_date TEXT NOT NULL,           -- YYYY-MM-DD (회고 날짜)
-      goal_met INTEGER NOT NULL DEFAULT 0,   -- 0/1
-      obstacles TEXT NOT NULL DEFAULT '',    -- 예: "피로,산만함" 또는 자유서술
-      note TEXT NOT NULL DEFAULT '',         -- 한 줄/여러 줄 회고
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE(user_id, log_date),
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
+        # ✅ 기능4: 학습 회고 노트 (날짜별 1개, 사용자별)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS reflections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        log_date TEXT NOT NULL,           -- YYYY-MM-DD (회고 날짜)
+        goal_met INTEGER NOT NULL DEFAULT 0,   -- 0/1
+        obstacles TEXT NOT NULL DEFAULT '',    -- 예: "피로,산만함" 또는 자유서술
+        note TEXT NOT NULL DEFAULT '',         -- 한 줄/여러 줄 회고
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(user_id, log_date),
+        FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """)
+
+    else:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE NOT NULL,
+          pw_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """)
+        # 기존 SQLite CREATE TABLE들 그대로
 
     conn.commit()
     conn.close()
